@@ -239,7 +239,7 @@ def is_compare_mode(year_mode: str) -> bool:
 
 
 def metric_delta_color(metric: str) -> str:
-    return "inverse" if metric == "Reverse Bounce Back" else "normal"
+    return "inverse" if metric in {"Reverse Bounce Back", "Bogey Following Bogey"} else "normal"
 
 
 @st.cache_data(show_spinner=False)
@@ -1023,7 +1023,7 @@ tab_team, tab_player = st.tabs(["Team Overview", "Player Explorer"])
 with tab_team:
     section_intro(
         "Team Overview",
-        "Start here during the interview: team movement, athlete spread, notable changes, and data-quality flags.",
+        "team movement, athlete spread, notable changes, and data-quality flags.",
     )
     render_kpi_cards(context, year_mode)
 

@@ -167,11 +167,17 @@ st.markdown(
 
 
 @st.cache_data(show_spinner=False)
-def get_data():
-    return process_workbook(DATA_PATH)
+def get_data(path: str, cache_key: float):
+    return process_workbook(Path(path))
 
 
-data = get_data()
+def workbook_cache_key(path: Path) -> float:
+    candidates = [path, Path(str(path) + ".b64")]
+    mtimes = [candidate.stat().st_mtime for candidate in candidates if candidate.exists()]
+    return max(mtimes) if mtimes else 0.0
+
+
+data = get_data(str(DATA_PATH), workbook_cache_key(DATA_PATH))
 
 
 def make_template(height: int = 430, top: int = 92, bottom: int = 54):
@@ -232,10 +238,16 @@ def is_compare_mode(year_mode: str) -> bool:
     return year_mode == "Compare 2024 vs 2025"
 
 
+def metric_delta_color(metric: str) -> str:
+    return "inverse" if metric == "Reverse Bounce Back" else "normal"
+
+
+@st.cache_data(show_spinner=False)
 def context_benchmark(context: str) -> pd.DataFrame:
     return data.team_benchmark[data.team_benchmark["Game Type"] == context].copy()
 
 
+@st.cache_data(show_spinner=False)
 def get_benchmark(context: str, year: int, metric: str) -> float:
     row = data.team_benchmark[
         (data.team_benchmark["Game Type"] == context)
@@ -247,6 +259,7 @@ def get_benchmark(context: str, year: int, metric: str) -> float:
     return float(row.iloc[0]["team_benchmark"])
 
 
+@st.cache_data(show_spinner=False)
 def player_metric_row(player: str, context: str, year: int, metric: str) -> pd.Series | None:
     rows = data.relative[
         (data.relative["Player"] == player)
@@ -259,6 +272,7 @@ def player_metric_row(player: str, context: str, year: int, metric: str) -> pd.S
     return rows.iloc[0]
 
 
+@st.cache_data(show_spinner=False)
 def player_yoy_row(player: str, context: str, metric: str) -> pd.Series | None:
     rows = data.yoy[
         (data.yoy["Player"] == player)
@@ -313,9 +327,16 @@ def render_kpi_cards(context: str, year_mode: str):
             value = pct(get_benchmark(context, year, metric))
             delta = None
         with cols[i]:
-            st.metric(metric, value, delta, help=f"{metric_definition(metric)}\n\nAverage Athlete Rate for {year}.")
+            st.metric(
+                metric,
+                value,
+                delta,
+                delta_color=metric_delta_color(metric),
+                help=f"{metric_definition(metric)}\n\nAverage Athlete Rate for {year}.",
+            )
 
 
+@st.cache_data(show_spinner=False)
 def team_dumbbell(context: str) -> go.Figure:
     bench = context_benchmark(context)
     rows = []
@@ -381,6 +402,7 @@ def team_dumbbell(context: str) -> go.Figure:
     return fig
 
 
+@st.cache_data(show_spinner=False)
 def player_metric_trend_lines(context: str) -> go.Figure:
     trend = data.relative[
         (data.relative["Game Type"] == context)
@@ -468,6 +490,7 @@ def player_metric_trend_lines(context: str) -> go.Figure:
     return fig
 
 
+@st.cache_data(show_spinner=False)
 def distribution_chart(context: str, year: int, metric: str) -> go.Figure:
     rel = data.relative[
         (data.relative["Game Type"] == context)
@@ -532,6 +555,7 @@ def render_all_metric_distributions(context: str, year: int):
             st.plotly_chart(distribution_chart(context, year, metric), width="stretch")
 
 
+@st.cache_data(show_spinner=False)
 def notable_changes(context: str) -> pd.DataFrame:
     rows = data.yoy[(data.yoy["Game Type"] == context) & data.yoy["yoy_change_pp"].notna()].copy()
     out = []
@@ -562,6 +586,7 @@ def notable_changes(context: str) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
+@st.cache_data(show_spinner=False)
 def table_for_year_mode(context: str, year_mode: str) -> pd.DataFrame:
     players = sorted(data.relative[data.relative["Game Type"] == context]["Player"].unique())
     rows = []
@@ -606,9 +631,10 @@ def player_snapshot(player: str, context: str, year_mode: str):
                 delta = f"{team_text} vs team"
             help_text = metric_definition(metric)
         with cols[i]:
-            st.metric(metric, value, delta, help=help_text)
+            st.metric(metric, value, delta, delta_color=metric_delta_color(metric), help=help_text)
 
 
+@st.cache_data(show_spinner=False)
 def player_profile_chart(player: str, context: str) -> go.Figure:
     rows = []
     for metric in METRICS:
@@ -682,6 +708,7 @@ def player_profile_chart(player: str, context: str) -> go.Figure:
     return fig
 
 
+@st.cache_data(show_spinner=False)
 def bad_hole_chart(player: str, context: str) -> go.Figure:
     bad_metrics = ["Bounce Back to Birdie", "Bounce Back to Par", "Bogey Following Bogey"]
     rows = []
@@ -715,6 +742,7 @@ def bad_hole_chart(player: str, context: str) -> go.Figure:
     return fig
 
 
+@st.cache_data(show_spinner=False)
 def bad_hole_chart_for_year(player: str, context: str, year: int) -> go.Figure:
     bad_metrics = ["Bounce Back to Birdie", "Bounce Back to Par", "Bogey Following Bogey"]
     rows = []
@@ -743,6 +771,7 @@ def bad_hole_chart_for_year(player: str, context: str, year: int) -> go.Figure:
     return fig
 
 
+@st.cache_data(show_spinner=False)
 def bad_hole_normalized_pie(player: str, context: str, year: int) -> go.Figure:
     pie_metrics = ["Bounce Back to Birdie", "Bounce Back to Par", "Bogey Following Bogey"]
     labels = [
@@ -797,6 +826,7 @@ def bad_hole_normalized_pie(player: str, context: str, year: int) -> go.Figure:
     return fig
 
 
+@st.cache_data(show_spinner=False)
 def bad_hole_context_comparison_chart(player: str, year: int) -> go.Figure:
     bad_metrics = ["Bounce Back to Birdie", "Bounce Back to Par", "Bogey Following Bogey"]
     contexts = [("Tournament", "Tournament Only", BERKELEY_BLUE), ("Tournament + Qualifying", "Tournament + Qualifying", CAL_GOLD)]
@@ -838,6 +868,7 @@ def bad_hole_context_comparison_chart(player: str, year: int) -> go.Figure:
     return fig
 
 
+@st.cache_data(show_spinner=False)
 def bad_hole_context_normalized_pie(player: str, year: int) -> go.Figure:
     pie_metrics = ["Bounce Back to Birdie", "Bounce Back to Par", "Bogey Following Bogey"]
     labels = ["Bogey+ -> Birdie+", "Bogey+ -> Par", "Bogey+ -> Bogey+"]
@@ -879,6 +910,7 @@ def bad_hole_context_normalized_pie(player: str, year: int) -> go.Figure:
     return fig
 
 
+@st.cache_data(show_spinner=False)
 def success_context_comparison_chart(player: str, year: int) -> go.Figure:
     metric = "Reverse Bounce Back"
     rows = []
@@ -906,6 +938,7 @@ def success_context_comparison_chart(player: str, year: int) -> go.Figure:
     return fig
 
 
+@st.cache_data(show_spinner=False)
 def team_comparison_chart(player: str, context: str, year: int, metric: str) -> go.Figure:
     rel = data.relative[
         (data.relative["Game Type"] == context)
@@ -951,6 +984,7 @@ def player_data_notes(player: str, context: str):
     st.dataframe(show, width="stretch", hide_index=True)
 
 
+@st.cache_data(show_spinner=False)
 def downloadable_table(context: str):
     table = data.comparison_table[data.comparison_table["Game Type"] == context].copy()
     table["Rate"] = table["clean_value"].map(pct)

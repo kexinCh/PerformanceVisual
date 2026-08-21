@@ -137,6 +137,41 @@ st.markdown(
     div[data-testid="stMetricDelta"] {
         color: #1F2937;
     }
+    .kpi-card {
+        background: #FFFFFF;
+        border: 1px solid #D8DEE9;
+        border-left: 5px solid #FDB515;
+        border-radius: 12px;
+        padding: 17px 18px;
+        min-height: 145px;
+        box-shadow: 0 8px 22px rgba(0, 50, 98, 0.055);
+    }
+    .kpi-label {
+        color: #1F2937;
+        font-weight: 700;
+        margin-bottom: 12px;
+    }
+    .kpi-values {
+        display: flex;
+        gap: 22px;
+    }
+    .kpi-stat-label {
+        color: #6B7280;
+        font-size: 0.78rem;
+        font-weight: 700;
+        text-transform: uppercase;
+    }
+    .kpi-stat-value {
+        color: #003262;
+        font-size: 1.8rem;
+        font-weight: 800;
+        line-height: 1.1;
+    }
+    .kpi-delta {
+        color: #6B7280;
+        font-size: 0.78rem;
+        margin-top: 4px;
+    }
     .small-note {
         color: #6B7280;
         font-size: 0.92rem;
@@ -260,6 +295,18 @@ def get_benchmark(context: str, year: int, metric: str) -> float:
 
 
 @st.cache_data(show_spinner=False)
+def get_median(context: str, year: int, metric: str) -> float:
+    row = data.team_benchmark[
+        (data.team_benchmark["Game Type"] == context)
+        & (data.team_benchmark["Year"] == year)
+        & (data.team_benchmark["Metric"].astype(str) == metric)
+    ]
+    if row.empty:
+        return np.nan
+    return float(row.iloc[0]["median"])
+
+
+@st.cache_data(show_spinner=False)
 def player_metric_row(player: str, context: str, year: int, metric: str) -> pd.Series | None:
     rows = data.relative[
         (data.relative["Player"] == player)
@@ -320,19 +367,40 @@ def render_kpi_cards(context: str, year_mode: str):
             year = 2025
             b24 = get_benchmark(context, 2024, metric)
             b25 = get_benchmark(context, 2025, metric)
-            value = pct(b25)
-            delta = f"{pp(b25 - b24)} vs 2024" if pd.notna(b24) and pd.notna(b25) else None
+            median24 = get_median(context, 2024, metric)
+            mean = b25
+            delta = f"{pp(b25 - b24)} vs 2024" if pd.notna(b24) and pd.notna(b25) else ""
+            median_delta = (
+                f"{pp(get_median(context, 2025, metric) - median24)} vs 2024"
+                if pd.notna(median24) and pd.notna(get_median(context, 2025, metric))
+                else ""
+            )
         else:
             year = year_from_mode(year_mode)
-            value = pct(get_benchmark(context, year, metric))
-            delta = None
+            mean = get_benchmark(context, year, metric)
+            delta = ""
+            median_delta = ""
+        median = get_median(context, year, metric)
         with cols[i]:
-            st.metric(
-                metric,
-                value,
-                delta,
-                delta_color=metric_delta_color(metric),
-                help=f"{metric_definition(metric)}\n\nAverage Athlete Rate for {year}.",
+            st.markdown(
+                f"""
+                <div class="kpi-card" title="{metric_definition(metric)}">
+                    <div class="kpi-label">{metric}</div>
+                    <div class="kpi-values">
+                        <div>
+                            <div class="kpi-stat-label">Mean</div>
+                            <div class="kpi-stat-value">{pct(mean)}</div>
+                            <div class="kpi-delta">{delta}</div>
+                        </div>
+                        <div>
+                            <div class="kpi-stat-label">Median</div>
+                            <div class="kpi-stat-value">{pct(median)}</div>
+                            <div class="kpi-delta">{median_delta}</div>
+                        </div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
 
 

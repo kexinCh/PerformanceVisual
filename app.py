@@ -1129,10 +1129,53 @@ def default_upload_year(validation) -> int:
     return 2026
 
 
+def render_remove_dataset_control():
+    st.markdown("### Remove Dataset")
+    if len(YEARS) <= 1:
+        st.warning("At least one dataset year must remain. Remove is disabled while only one year is available.")
+        return
+
+    removal_years = sorted(YEARS, reverse=True)
+    if st.session_state.get("dataset_remove_year") not in removal_years:
+        st.session_state.pop("dataset_remove_year", None)
+    if st.session_state.get("dataset_remove_previous_year") not in removal_years:
+        st.session_state.pop("dataset_remove_previous_year", None)
+        st.session_state.pop("dataset_remove_confirm", None)
+
+    selected_year = st.selectbox(
+        "Dataset year to remove",
+        removal_years,
+        key="dataset_remove_year",
+    )
+    if st.session_state.get("dataset_remove_previous_year") != selected_year:
+        st.session_state["dataset_remove_previous_year"] = selected_year
+        st.session_state.pop("dataset_remove_confirm", None)
+
+    confirmed = st.checkbox(
+        f"Confirm removal of {selected_year}",
+        key="dataset_remove_confirm",
+    )
+
+    if st.button("Remove Dataset", disabled=not confirmed):
+        next_raw = data.raw_wide[data.raw_wide["Year"].astype(int) != int(selected_year)].copy()
+        if next_raw.empty:
+            st.error("Cannot remove the last remaining dataset.")
+            return
+
+        st.session_state["dataset_raw_wide"] = next_raw
+        st.session_state["dataset_upload_message"] = (
+            f"{selected_year} data removed successfully. Dashboard updated."
+        )
+        st.cache_data.clear()
+        st.rerun()
+
+
 def render_upload_control():
     with st.expander("Upload Dataset", expanded=False):
         if "dataset_upload_message" in st.session_state:
             st.success(st.session_state["dataset_upload_message"])
+
+        render_remove_dataset_control()
 
         uploaded_file = st.file_uploader(
             "Dataset file",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
@@ -13,10 +14,13 @@ from data_processing import (
     LABEL_TO_GAME_TYPE,
     METRIC_DEFINITIONS,
     METRICS,
+    available_years,
     pp,
     pp_neutral,
     pct,
+    process_raw_wide,
     process_workbook,
+    validate_uploaded_dataset,
 )
 
 
@@ -33,7 +37,6 @@ ROSE = "#B56576"
 LIGHT_BG = "#F7F9FC"
 
 PRIMARY_CONTEXT_LABEL = "Tournament + Qualifying"
-PRIMARY_YEAR_MODE = "Compare 2024 vs 2025"
 
 
 st.set_page_config(
@@ -213,6 +216,9 @@ def workbook_cache_key(path: Path) -> float:
 
 
 data = get_data(str(DATA_PATH), workbook_cache_key(DATA_PATH))
+if "dataset_raw_wide" in st.session_state:
+    data = process_raw_wide(st.session_state["dataset_raw_wide"])
+YEARS = available_years(data.raw_wide)
 
 
 def make_template(height: int = 430, top: int = 92, bottom: int = 54):
@@ -251,9 +257,10 @@ def selected_context_controls(presentation_mode: bool):
             help="Tournament + Qualifying is the default interview view. Tournament Only is analyzed separately.",
         )
     with col2:
+        options = year_mode_options()
         year_mode = st.selectbox(
             "Year View",
-            ["Compare 2024 vs 2025", "2025", "2024"],
+            options,
             index=0,
             help="Compare mode emphasizes year-over-year movement.",
         )
@@ -265,12 +272,30 @@ def selected_context_controls(presentation_mode: bool):
     return LABEL_TO_GAME_TYPE[context_label], year_mode
 
 
+def year_mode_options() -> list[str]:
+    if not YEARS:
+        return []
+    comparisons = [f"Compare {start} vs {end}" for idx, start in enumerate(YEARS) for end in YEARS[idx + 1 :]]
+    comparisons = comparisons[::-1]
+    single_years = [str(year) for year in sorted(YEARS, reverse=True)]
+    return comparisons + single_years if comparisons else single_years
+
+
 def year_from_mode(year_mode: str) -> int:
-    return 2024 if year_mode == "2024" else 2025
+    if is_compare_mode(year_mode):
+        return compare_years_from_mode(year_mode)[1]
+    return int(year_mode)
 
 
 def is_compare_mode(year_mode: str) -> bool:
-    return year_mode == "Compare 2024 vs 2025"
+    return year_mode.startswith("Compare ")
+
+
+def compare_years_from_mode(year_mode: str) -> tuple[int, int]:
+    years = [int(match) for match in re.findall(r"20\d{2}", year_mode)]
+    if len(years) != 2:
+        raise ValueError(f"Could not parse comparison years from {year_mode!r}")
+    return years[0], years[1]
 
 
 def metric_delta_color(metric: str) -> str:
@@ -320,11 +345,13 @@ def player_metric_row(player: str, context: str, year: int, metric: str) -> pd.S
 
 
 @st.cache_data(show_spinner=False)
-def player_yoy_row(player: str, context: str, metric: str) -> pd.Series | None:
+def player_yoy_row(player: str, context: str, metric: str, start_year: int, end_year: int) -> pd.Series | None:
     rows = data.yoy[
         (data.yoy["Player"] == player)
         & (data.yoy["Game Type"] == context)
         & (data.yoy["Metric"].astype(str) == metric)
+        & (data.yoy["start_year"] == start_year)
+        & (data.yoy["end_year"] == end_year)
     ]
     if rows.empty:
         return None
@@ -364,15 +391,17 @@ def render_kpi_cards(context: str, year_mode: str):
     cols = st.columns(4)
     for i, metric in enumerate(METRICS):
         if is_compare_mode(year_mode):
-            year = 2025
-            b24 = get_benchmark(context, 2024, metric)
-            b25 = get_benchmark(context, 2025, metric)
-            median24 = get_median(context, 2024, metric)
-            mean = b25
-            delta = f"{pp(b25 - b24)} vs 2024" if pd.notna(b24) and pd.notna(b25) else ""
+            start_year, end_year = compare_years_from_mode(year_mode)
+            year = end_year
+            start_benchmark = get_benchmark(context, start_year, metric)
+            end_benchmark = get_benchmark(context, end_year, metric)
+            start_median = get_median(context, start_year, metric)
+            end_median = get_median(context, end_year, metric)
+            mean = end_benchmark
+            delta = f"{pp(end_benchmark - start_benchmark)} vs {start_year}" if pd.notna(start_benchmark) and pd.notna(end_benchmark) else ""
             median_delta = (
-                f"{pp(get_median(context, 2025, metric) - median24)} vs 2024"
-                if pd.notna(median24) and pd.notna(get_median(context, 2025, metric))
+                f"{pp(end_median - start_median)} vs {start_year}"
+                if pd.notna(start_median) and pd.notna(end_median)
                 else ""
             )
         else:
@@ -405,20 +434,19 @@ def render_kpi_cards(context: str, year_mode: str):
 
 
 @st.cache_data(show_spinner=False)
-def team_dumbbell(context: str) -> go.Figure:
-    bench = context_benchmark(context)
+def team_dumbbell(context: str, start_year: int, end_year: int) -> go.Figure:
     rows = []
     for metric in METRICS:
-        b24 = get_benchmark(context, 2024, metric)
-        b25 = get_benchmark(context, 2025, metric)
-        rows.append({"Metric": metric, "2024": b24, "2025": b25, "Change": b25 - b24})
+        start_benchmark = get_benchmark(context, start_year, metric)
+        end_benchmark = get_benchmark(context, end_year, metric)
+        rows.append({"Metric": metric, "Start": start_benchmark, "End": end_benchmark, "Change": end_benchmark - start_benchmark})
     chart = pd.DataFrame(rows).iloc[::-1]
 
     fig = go.Figure()
     for _, row in chart.iterrows():
         fig.add_trace(
             go.Scatter(
-                x=[row["2024"], row["2025"]],
+                x=[row["Start"], row["End"]],
                 y=[row["Metric"], row["Metric"]],
                 mode="lines",
                 line=dict(color=LINE, width=8),
@@ -428,31 +456,31 @@ def team_dumbbell(context: str) -> go.Figure:
         )
     fig.add_trace(
         go.Scatter(
-            x=chart["2024"],
+            x=chart["Start"],
             y=chart["Metric"],
             mode="markers+text",
             marker=dict(size=18, color=BERKELEY_BLUE),
-            text=chart["2024"].map(pct),
+            text=chart["Start"].map(pct),
             textposition="middle left",
-            name="2024",
-            hovertemplate="<b>%{y}</b><br>2024 benchmark: %{x:.1%}<extra></extra>",
+            name=str(start_year),
+            hovertemplate=f"<b>%{{y}}</b><br>{start_year} benchmark: %{{x:.1%}}<extra></extra>",
         )
     )
     fig.add_trace(
         go.Scatter(
-            x=chart["2025"],
+            x=chart["End"],
             y=chart["Metric"],
             mode="markers+text",
             marker=dict(size=18, color=CAL_GOLD, line=dict(color="#8A6D00", width=1)),
-            text=chart["2025"].map(pct),
+            text=chart["End"].map(pct),
             textposition="middle right",
-            name="2025",
-            hovertemplate="<b>%{y}</b><br>2025 benchmark: %{x:.1%}<extra></extra>",
+            name=str(end_year),
+            hovertemplate=f"<b>%{{y}}</b><br>{end_year} benchmark: %{{x:.1%}}<extra></extra>",
         )
     )
     fig.add_trace(
         go.Scatter(
-            x=chart[["2024", "2025"]].max(axis=1) + 0.085,
+            x=chart[["Start", "End"]].max(axis=1) + 0.085,
             y=chart["Metric"],
             mode="text",
             text=chart["Change"].map(pp),
@@ -464,7 +492,7 @@ def team_dumbbell(context: str) -> go.Figure:
     fig.update_layout(
         **make_template(470, top=94, bottom=62),
         title=f"How Did the Team Change?<br><sup>{GAME_TYPE_LABELS[context]} • average athlete rate</sup>",
-        xaxis=dict(tickformat=".0%", title="Team Benchmark", range=[0, max(chart[["2024", "2025"]].max()) + 0.18]),
+        xaxis=dict(tickformat=".0%", title="Team Benchmark", range=[0, max(chart[["Start", "End"]].max()) + 0.18]),
         yaxis=dict(title=None),
     )
     return fig
@@ -543,8 +571,8 @@ def player_metric_trend_lines(context: str) -> go.Figure:
         fig.update_xaxes(
             title="Year",
             tickmode="array",
-            tickvals=[2024, 2025],
-            range=[2023.85, 2025.15],
+            tickvals=YEARS,
+            range=[min(YEARS) - 0.15, max(YEARS) + 0.15] if YEARS else None,
             row=((idx - 1) // 2) + 1,
             col=((idx - 1) % 2) + 1,
         )
@@ -559,17 +587,23 @@ def player_metric_trend_lines(context: str) -> go.Figure:
 
 
 @st.cache_data(show_spinner=False)
-def distribution_chart(context: str, year: int, metric: str) -> go.Figure:
+def distribution_chart(context: str, year: int, metric: str, start_year: int | None = None, end_year: int | None = None) -> go.Figure:
     rel = data.relative[
         (data.relative["Game Type"] == context)
         & (data.relative["Year"] == year)
         & (data.relative["Metric"].astype(str) == metric)
         & (data.relative["data_status"] == "valid")
     ].copy()
-    yoy = data.yoy[(data.yoy["Game Type"] == context) & (data.yoy["Metric"].astype(str) == metric)][
-        ["Player", "yoy_change_pp"]
-    ]
-    rel = rel.merge(yoy, on="Player", how="left")
+    if start_year is not None and end_year is not None:
+        yoy = data.yoy[
+            (data.yoy["Game Type"] == context)
+            & (data.yoy["Metric"].astype(str) == metric)
+            & (data.yoy["start_year"] == start_year)
+            & (data.yoy["end_year"] == end_year)
+        ][["Player", "yoy_change_pp"]]
+        rel = rel.merge(yoy, on="Player", how="left")
+    else:
+        rel["yoy_change_pp"] = np.nan
 
     fig = go.Figure()
     fig.add_trace(
@@ -624,8 +658,13 @@ def render_all_metric_distributions(context: str, year: int):
 
 
 @st.cache_data(show_spinner=False)
-def notable_changes(context: str) -> pd.DataFrame:
-    rows = data.yoy[(data.yoy["Game Type"] == context) & data.yoy["yoy_change_pp"].notna()].copy()
+def notable_changes(context: str, start_year: int, end_year: int) -> pd.DataFrame:
+    rows = data.yoy[
+        (data.yoy["Game Type"] == context)
+        & (data.yoy["start_year"] == start_year)
+        & (data.yoy["end_year"] == end_year)
+        & data.yoy["yoy_change_pp"].notna()
+    ].copy()
     out = []
     for metric in METRICS:
         metric_rows = rows[rows["Metric"].astype(str) == metric]
@@ -639,7 +678,7 @@ def notable_changes(context: str) -> pd.DataFrame:
                 "Player": inc["Player"],
                 "Metric": metric,
                 "Change": pp(inc["yoy_change_pp"]),
-                "Coach-facing note": f"{inc['Player']} - {metric} increased {pp(inc['yoy_change_pp'])}.",
+                "Coach-facing note": f"{inc['Player']} - {metric} increased {pp(inc['yoy_change_pp'])} from {start_year} to {end_year}.",
             }
         )
         out.append(
@@ -648,7 +687,7 @@ def notable_changes(context: str) -> pd.DataFrame:
                 "Player": dec["Player"],
                 "Metric": metric,
                 "Change": pp(dec["yoy_change_pp"]),
-                "Coach-facing note": f"{dec['Player']} - {metric} changed {pp(dec['yoy_change_pp'])}.",
+                "Coach-facing note": f"{dec['Player']} - {metric} changed {pp(dec['yoy_change_pp'])} from {start_year} to {end_year}.",
             }
         )
     return pd.DataFrame(out)
@@ -661,18 +700,16 @@ def table_for_year_mode(context: str, year_mode: str) -> pd.DataFrame:
     for player in players:
         row = {"Player": player}
         for metric in METRICS:
-            if year_mode == "2024":
-                r = player_metric_row(player, context, 2024, metric)
-                row[f"{metric} Rate"] = pct(r["clean_value"]) if r is not None else "NA"
-                row[f"{metric} vs Team"] = pp(r["relative_to_team_pp"]) if r is not None else "NA"
-            elif year_mode == "2025":
-                r = player_metric_row(player, context, 2025, metric)
+            if not is_compare_mode(year_mode):
+                year = year_from_mode(year_mode)
+                r = player_metric_row(player, context, year, metric)
                 row[f"{metric} Rate"] = pct(r["clean_value"]) if r is not None else "NA"
                 row[f"{metric} vs Team"] = pp(r["relative_to_team_pp"]) if r is not None else "NA"
             else:
-                y = player_yoy_row(player, context, metric)
-                row[f"{metric} Rate"] = pct(y["clean_value_2025"]) if y is not None else "NA"
-                row[f"{metric} vs Team"] = pp(y["relative_to_team_pp_2025"]) if y is not None else "NA"
+                start_year, end_year = compare_years_from_mode(year_mode)
+                y = player_yoy_row(player, context, metric, start_year, end_year)
+                row[f"{metric} Rate"] = pct(y["end_clean_value"]) if y is not None else "NA"
+                row[f"{metric} vs Team"] = pp(y["end_relative_to_team_pp"]) if y is not None else "NA"
                 row[f"{metric} YoY"] = pp(y["yoy_change_pp"]) if y is not None else "NA"
         rows.append(row)
     return pd.DataFrame(rows)
@@ -681,20 +718,21 @@ def table_for_year_mode(context: str, year_mode: str) -> pd.DataFrame:
 def player_snapshot(player: str, context: str, year_mode: str):
     cols = st.columns(4)
     selected_year = year_from_mode(year_mode)
+    compare_years = compare_years_from_mode(year_mode) if is_compare_mode(year_mode) else None
     for i, metric in enumerate(METRICS):
-        year = 2025 if is_compare_mode(year_mode) else selected_year
-        r25 = player_metric_row(player, context, year, metric)
-        y = player_yoy_row(player, context, metric)
-        if r25 is None or r25["data_status"] != "valid":
+        year = selected_year
+        current_row = player_metric_row(player, context, year, metric)
+        y = player_yoy_row(player, context, metric, *compare_years) if compare_years else None
+        if current_row is None or current_row["data_status"] != "valid":
             value = "NA"
-            delta = r25["data_explanation"] if r25 is not None else "No row available."
+            delta = current_row["data_explanation"] if current_row is not None else "No row available."
             help_text = delta
         else:
-            value = pct(r25["clean_value"])
-            team_text = pp(r25["relative_to_team_pp"])
+            value = pct(current_row["clean_value"])
+            team_text = pp(current_row["relative_to_team_pp"])
             if is_compare_mode(year_mode):
                 yoy_text = pp(y["yoy_change_pp"]) if y is not None else "NA"
-                delta = f"{yoy_text} vs 2024 | {team_text} vs team"
+                delta = f"{yoy_text} vs {compare_years[0]} | {team_text} vs team"
             else:
                 delta = f"{team_text} vs team"
             help_text = metric_definition(metric)
@@ -703,27 +741,27 @@ def player_snapshot(player: str, context: str, year_mode: str):
 
 
 @st.cache_data(show_spinner=False)
-def player_profile_chart(player: str, context: str) -> go.Figure:
+def player_profile_chart(player: str, context: str, start_year: int, end_year: int) -> go.Figure:
     rows = []
     for metric in METRICS:
-        y = player_yoy_row(player, context, metric)
+        y = player_yoy_row(player, context, metric, start_year, end_year)
         if y is None:
             continue
         rows.append(
             {
                 "Metric": metric,
-                "2024": y["clean_value_2024"],
-                "2025": y["clean_value_2025"],
+                "Start": y["start_clean_value"],
+                "End": y["end_clean_value"],
                 "Change": y["yoy_change_pp"],
             }
         )
     chart = pd.DataFrame(rows).iloc[::-1]
     fig = go.Figure()
     for _, row in chart.iterrows():
-        if pd.notna(row["2024"]) and pd.notna(row["2025"]):
+        if pd.notna(row["Start"]) and pd.notna(row["End"]):
             fig.add_trace(
                 go.Scatter(
-                    x=[row["2024"], row["2025"]],
+                    x=[row["Start"], row["End"]],
                     y=[row["Metric"], row["Metric"]],
                     mode="lines",
                     line=dict(color=LINE, width=7),
@@ -733,31 +771,31 @@ def player_profile_chart(player: str, context: str) -> go.Figure:
             )
     fig.add_trace(
         go.Scatter(
-            x=chart["2024"],
+            x=chart["Start"],
             y=chart["Metric"],
             mode="markers+text",
-            text=chart["2024"].map(pct),
+            text=chart["Start"].map(pct),
             textposition="middle left",
             marker=dict(size=17, color=BERKELEY_BLUE),
-            name="2024",
-            hovertemplate="<b>%{y}</b><br>2024: %{x:.1%}<extra></extra>",
+            name=str(start_year),
+            hovertemplate=f"<b>%{{y}}</b><br>{start_year}: %{{x:.1%}}<extra></extra>",
         )
     )
     fig.add_trace(
         go.Scatter(
-            x=chart["2025"],
+            x=chart["End"],
             y=chart["Metric"],
             mode="markers+text",
-            text=chart["2025"].map(pct),
+            text=chart["End"].map(pct),
             textposition="middle right",
             marker=dict(size=17, color=CAL_GOLD, line=dict(color="#8A6D00", width=1)),
-            name="2025",
-            hovertemplate="<b>%{y}</b><br>2025: %{x:.1%}<extra></extra>",
+            name=str(end_year),
+            hovertemplate=f"<b>%{{y}}</b><br>{end_year}: %{{x:.1%}}<extra></extra>",
         )
     )
     fig.add_trace(
         go.Scatter(
-            x=chart[["2024", "2025"]].max(axis=1) + 0.09,
+            x=chart[["Start", "End"]].max(axis=1) + 0.09,
             y=chart["Metric"],
             mode="text",
             text=chart["Change"].map(pp),
@@ -766,7 +804,7 @@ def player_profile_chart(player: str, context: str) -> go.Figure:
             hoverinfo="skip",
         )
     )
-    max_x = np.nanmax(chart[["2024", "2025"]].values)
+    max_x = np.nanmax(chart[["Start", "End"]].values)
     fig.update_layout(
         **make_template(470, top=98, bottom=66),
         title=f"How Has {player} Changed?<br><sup>{GAME_TYPE_LABELS[context]} • supplied rates shown directly</sup>",
@@ -781,12 +819,15 @@ def bad_hole_chart(player: str, context: str) -> go.Figure:
     bad_metrics = ["Bounce Back to Birdie", "Bounce Back to Par", "Bogey Following Bogey"]
     rows = []
     for metric in bad_metrics:
-        for year in [2024, 2025]:
+        for year in YEARS:
             r = player_metric_row(player, context, year, metric)
             rows.append({"Metric": metric, "Year": str(year), "Rate": r["clean_value"] if r is not None else np.nan})
     chart = pd.DataFrame(rows)
     fig = go.Figure()
-    for year, color in [("2024", BERKELEY_BLUE), ("2025", CAL_GOLD)]:
+    palette = [BERKELEY_BLUE, CAL_GOLD, TEAL, ROSE, "#6C5CE7", "#E76F51"]
+    for idx, year in enumerate(YEARS):
+        color = palette[idx % len(palette)]
+        year = str(year)
         part = chart[chart["Year"] == year]
         fig.add_trace(
             go.Bar(
@@ -952,7 +993,10 @@ def bad_hole_context_normalized_pie(player: str, year: int) -> go.Figure:
             row = player_metric_row(player, context_value, year, metric)
             values.append(row["clean_value"] if row is not None and row["data_status"] == "valid" else np.nan)
         total = np.nansum(values)
-        norm_values = [v / total if pd.notna(v) and total > 0 else 0 for v in values]
+        if not total or pd.isna(total):
+            norm_values = [np.nan for _ in values]
+        else:
+            norm_values = [v / total if pd.notna(v) and total > 0 else np.nan for v in values]
         fig.add_trace(
             go.Pie(
                 labels=labels,
@@ -1065,6 +1109,138 @@ def downloadable_table(context: str):
     return export
 
 
+def describe_years(years: list[int]) -> str:
+    if len(years) == 1:
+        return str(years[0])
+    return ", ".join(str(year) for year in years)
+
+
+def upload_file_signature(uploaded_file) -> str:
+    return f"{uploaded_file.name}:{getattr(uploaded_file, 'size', 'unknown')}"
+
+
+def default_upload_year(validation) -> int:
+    if getattr(validation, "filename_year", None) is not None:
+        return validation.filename_year
+    if getattr(validation, "sheet_years", None):
+        return validation.sheet_years[0]
+    if YEARS:
+        return max(YEARS) + 1
+    return 2026
+
+
+def render_upload_control():
+    with st.expander("Upload Dataset", expanded=False):
+        if "dataset_upload_message" in st.session_state:
+            st.success(st.session_state["dataset_upload_message"])
+
+        uploaded_file = st.file_uploader(
+            "Dataset file",
+            type=["xlsx", "csv"],
+            label_visibility="collapsed",
+            key="dataset_upload_file",
+        )
+        upload_mode = st.radio(
+            "Upload behavior",
+            ["Add New Year", "Replace Current Dataset"],
+            horizontal=False,
+            label_visibility="collapsed",
+            key="dataset_upload_mode",
+        )
+
+        if not uploaded_file:
+            st.caption("Upload .xlsx or .csv data using the current dashboard schema.")
+            return
+
+        signature = upload_file_signature(uploaded_file)
+        if st.session_state.get("dataset_upload_signature") != signature:
+            st.session_state["dataset_upload_signature"] = signature
+            st.session_state.pop("dataset_upload_manual_year", None)
+            st.session_state.pop("dataset_upload_conflict_year", None)
+            st.session_state.pop("dataset_upload_overwrite", None)
+
+        try:
+            validation = validate_uploaded_dataset(uploaded_file, uploaded_file.name)
+        except Exception as exc:
+            st.error(str(exc))
+            return
+
+        selected_year = None
+        needs_manual_year = bool(getattr(validation, "needs_manual_year", False))
+        year_conflicts = list(getattr(validation, "year_conflicts", []) or [])
+
+        if needs_manual_year:
+            st.warning("No year was found in the uploaded filename or worksheet name.")
+            selected_year = st.number_input(
+                "Enter dataset year",
+                min_value=2000,
+                max_value=2100,
+                value=int(st.session_state.get("dataset_upload_manual_year", default_upload_year(validation))),
+                step=1,
+                key="dataset_upload_manual_year",
+            )
+            validation = validate_uploaded_dataset(uploaded_file, uploaded_file.name, selected_year=int(selected_year))
+        elif year_conflicts:
+            st.warning(
+                "The uploaded filename and worksheet name contain different years. Select the year to apply before continuing."
+            )
+            for conflict in year_conflicts:
+                st.caption(conflict)
+            year_options = sorted(
+                {
+                    year
+                    for year in [getattr(validation, "filename_year", None), *getattr(validation, "sheet_years", [])]
+                    if year is not None
+                }
+            )
+            default_year = int(
+                st.session_state.get("dataset_upload_conflict_year", getattr(validation, "filename_year", None) or year_options[0])
+            )
+            default_index = year_options.index(default_year) if default_year in year_options else 0
+            selected_year = st.selectbox(
+                "Correct year",
+                year_options,
+                index=default_index,
+                key="dataset_upload_conflict_year",
+            )
+            validation = validate_uploaded_dataset(uploaded_file, uploaded_file.name, selected_year=int(selected_year))
+
+        uploaded_years = available_years(validation.raw_wide)
+        for error in validation.errors:
+            st.error(error)
+        for warning in validation.warnings:
+            st.warning(warning)
+
+        if not validation.is_valid:
+            return
+
+        conflicts = sorted(set(uploaded_years) & set(YEARS))
+        overwrite_existing = True
+        if upload_mode == "Add New Year" and conflicts:
+            st.warning(
+                f"{describe_years(conflicts)} already exists in the current dataset. Confirm overwrite to replace those year(s)."
+            )
+            overwrite_existing = st.checkbox("Overwrite existing year data", key="dataset_upload_overwrite")
+
+        button_label = "Add Year" if upload_mode == "Add New Year" else "Replace Dataset"
+        disable_apply = upload_mode == "Add New Year" and bool(conflicts) and not overwrite_existing
+        if st.button(button_label, disabled=disable_apply):
+            if upload_mode == "Replace Current Dataset":
+                next_raw = validation.raw_wide.copy()
+                action = "replaced"
+            else:
+                kept = data.raw_wide[~data.raw_wide["Year"].astype(int).isin(uploaded_years)].copy()
+                next_raw = pd.concat([kept, validation.raw_wide], ignore_index=True)
+                action = "added"
+
+            st.session_state["dataset_raw_wide"] = next_raw
+            st.session_state["dataset_upload_message"] = (
+                f"{describe_years(uploaded_years)} data {action} successfully. Dashboard updated."
+            )
+            st.cache_data.clear()
+            st.rerun()
+
+
 st.markdown(
     """
     <div class="dashboard-hero">
@@ -1082,6 +1258,7 @@ st.markdown(
 top_col1, top_col2 = st.columns([3.5, 1])
 with top_col2:
     presentation_mode = st.toggle("Presentation Mode", value=True, help="Simplifies technical notes and prioritizes live-demo readability.")
+    render_upload_control()
 
 context, year_mode = selected_context_controls(presentation_mode)
 render_glossary(presentation_mode)
@@ -1096,7 +1273,8 @@ with tab_team:
     render_kpi_cards(context, year_mode)
 
     if is_compare_mode(year_mode):
-        st.plotly_chart(team_dumbbell(context), width="stretch")
+        start_year, end_year = compare_years_from_mode(year_mode)
+        st.plotly_chart(team_dumbbell(context, start_year, end_year), width="stretch")
         st.plotly_chart(player_metric_trend_lines(context), width="stretch")
 
     st.markdown("### Player Distribution")
@@ -1105,13 +1283,13 @@ with tab_team:
         with dist_col1:
             selected_year = st.radio(
                 "Distribution Year",
-                [2025, 2024],
+                [end_year, start_year],
                 horizontal=True,
                 help="Distribution uses valid supplied athlete rates only. Missing or invalid values are not treated as zero.",
             )
             dist_metric = st.selectbox("Distribution Metric", METRICS, index=0)
         with dist_col2:
-            st.plotly_chart(distribution_chart(context, selected_year, dist_metric), width="stretch")
+            st.plotly_chart(distribution_chart(context, selected_year, dist_metric, start_year, end_year), width="stretch")
     else:
         selected_year = year_from_mode(year_mode)
         st.markdown(
@@ -1125,7 +1303,7 @@ with tab_team:
         with changes_col:
             st.markdown("### Notable Changes")
             st.markdown("<div class='small-note'>Largest absolute movements are neutral review prompts, not athlete labels.</div>", unsafe_allow_html=True)
-            st.dataframe(notable_changes(context), hide_index=True, width="stretch")
+            st.dataframe(notable_changes(context, start_year, end_year), hide_index=True, width="stretch")
         with notes_col:
             st.markdown("### Values Needing Review")
             review = data.validation_notes[data.validation_notes["Game Type"] == context].copy()
@@ -1178,9 +1356,10 @@ with tab_player:
     )
     player_snapshot(player, context, year_mode)
 
-    active_year = 2025 if is_compare_mode(year_mode) else year_from_mode(year_mode)
+    active_year = year_from_mode(year_mode)
     if is_compare_mode(year_mode):
-        st.plotly_chart(player_profile_chart(player, context), width="stretch")
+        start_year, end_year = compare_years_from_mode(year_mode)
+        st.plotly_chart(player_profile_chart(player, context, start_year, end_year), width="stretch")
 
     st.markdown("<div class='section-title'>Transition Detail</div>", unsafe_allow_html=True)
     st.markdown(
@@ -1202,7 +1381,7 @@ with tab_player:
     compare_col1, compare_col2 = st.columns([1, 3])
     with compare_col1:
         if is_compare_mode(year_mode):
-            compare_year = st.radio("Comparison Year", [2025, 2024], horizontal=True)
+            compare_year = st.radio("Comparison Year", [end_year, start_year], horizontal=True)
         else:
             compare_year = active_year
             st.markdown(f"<div class='small-note'>Comparison year: {active_year}</div>", unsafe_allow_html=True)
